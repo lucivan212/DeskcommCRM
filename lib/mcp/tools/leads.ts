@@ -12,6 +12,7 @@
  * Write tools exigem role>=manager + scope mcp:write (gate no server core).
  */
 import { z } from "zod";
+import { comIdempotencia } from "@/lib/api/idempotency";
 
 import {
   listLeadsHandler,
@@ -357,34 +358,51 @@ export const crmCreateLead: McpToolDefinition<typeof createInputShape> = {
       input.custom_fields,
     );
     const custom_fields = conferencia.custom_fields ?? input.custom_fields;
-    const lead = await createLeadHandler(
-      ctx.supabase,
-      {
-        organization_id: ctx.organizationId,
-        actor: ctx.actor,
-        requestId: ctx.requestId,
-      },
-      // `custom_fields` entra POR FORA do `createLeadSchema.parse`, de
-      // propósito: o schema de criação aceita a chave desde #3038, mas o parse
-      // acima não a repassa, porque o valor que vale é o que sai de
-      // `conferirCamposPersonalizados` (sem os campos recusados). É a interseção
-      // que o webhook de captação também monta. Sem isto o argumento do agente
-      // morria aqui dentro, antes da régua que ele precisa satisfazer (#2297,
-      // caminho 2).
-      {
-        ...parsed,
-        ...(custom_fields === undefined ? {} : { custom_fields }),
-      },
-    );
-    return {
-      lead,
-      ...(conferencia.recusados.length > 0
-        ? {
-            campos_nao_gravados: conferencia.recusados,
-            erro_de_ensino: conferencia.recusados.map((r) => r.mensagem).join(" "),
-          }
-        : {}),
+    const executar = async () => {
+      const lead = await createLeadHandler(
+        ctx.supabase,
+        {
+          organization_id: ctx.organizationId,
+          actor: ctx.actor,
+          requestId: ctx.requestId,
+        },
+        // `custom_fields` entra POR FORA do `createLeadSchema.parse`, de
+        // propósito: o schema de criação aceita a chave desde #3038, mas o parse
+        // acima não a repassa, porque o valor que vale é o que sai de
+        // `conferirCamposPersonalizados` (sem os campos recusados). É a interseção
+        // que o webhook de captação também monta. Sem isto o argumento do agente
+        // morria aqui dentro, antes da régua que ele precisa satisfazer (#2297,
+        // caminho 2).
+        {
+          ...parsed,
+          ...(custom_fields === undefined ? {} : { custom_fields }),
+        },
+      );
+      return {
+        resposta: {
+          lead,
+          ...(conferencia.recusados.length > 0
+            ? {
+                campos_nao_gravados: conferencia.recusados,
+                erro_de_ensino: conferencia.recusados.map((r) => r.mensagem).join(" "),
+              }
+            : {}),
+        },
+        status: 201,
+      };
     };
+    if (!ctx.idempotencyKey) return (await executar()).resposta;
+    const idem = await comIdempotencia({
+      db: ctx.supabase,
+      organizationId: ctx.organizationId,
+      endpoint: "mcp:crm_create_lead",
+      chave: ctx.idempotencyKey,
+      corpo: { ...parsed, ...(custom_fields === undefined ? {} : { custom_fields }) },
+      executar,
+    });
+    if (idem.tipo === "executou" || idem.tipo === "replay") return idem.resposta;
+    if (idem.tipo === "conflito") throw new Error("idempotency_conflict");
+    throw new Error("idempotency_in_progress");
   },
 };
 

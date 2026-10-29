@@ -1,0 +1,5 @@
+services:
+  app:
+    environment:
+      NEXT_PUBLIC_APP_URL: https://deskcomm-p0.87-254-23-232.sslip.io
+      NEXT_PUBLIC_SUPABASE_URL: https://deskcomm-p0.87-254-23-232.sslip.io
