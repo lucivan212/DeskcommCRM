@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * `GET /api/v1/messages/{id}/media?formato=aac` — F2 da ADR-0006.
  *
@@ -83,7 +84,7 @@ vi.mock("@/lib/messaging/media/voice-transcode", async (original) => ({
 import { GET } from "@/app/api/v1/messages/[id]/media/route";
 
 const audio = {
-  id: "mensagem-1",
+  id: "55555555-5555-4555-8555-555555555555",
   media_url: null,
   media_mime: "audio/ogg; codecs=opus",
   media_size_bytes: 9,
@@ -93,9 +94,9 @@ const audio = {
 };
 
 function pedir(formato?: string): Promise<Response> {
-  const url = new URL("http://localhost/api/v1/messages/mensagem-1/media");
+  const url = new URL("http://localhost/api/v1/messages/55555555-5555-4555-8555-555555555555/media");
   if (formato !== undefined) url.searchParams.set("formato", formato);
-  return GET(new Request(url) as never, { params: Promise.resolve({ id: "mensagem-1" }) });
+  return GET(new Request(url) as never, { params: Promise.resolve({ id: "55555555-5555-4555-8555-555555555555" }) });
 }
 
 async function codigo(r: Response): Promise<string | undefined> {
@@ -129,7 +130,7 @@ describe("?formato=aac", () => {
   it("a leitura da mensagem filtra a organização ativa", async () => {
     await pedir("aac");
     expect(estado.eqs).toContainEqual(["organization_id", "org-1"]);
-    expect(estado.eqs).toContainEqual(["id", "mensagem-1"]);
+    expect(estado.eqs).toContainEqual(["id", "55555555-5555-4555-8555-555555555555"]);
   });
 
   it("422 para formato desconhecido — e sem converter nada", async () => {
@@ -191,9 +192,11 @@ describe("?formato=aac", () => {
     expect(await codigo(r)).toBe("conversor_ocupado");
   });
 
-  it("sem ?formato a rota segue como sempre: 302 para a URL assinada, sem converter", async () => {
+  it("sem ?formato entrega os bytes privados sem converter", async () => {
     const r = await pedir();
-    expect(r.status).toBe(302);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("location")).toBeNull();
+    expect(await r.text()).toBe("ogg-bytes");
     expect(converter).not.toHaveBeenCalled();
     expect(estado.baldes).toEqual([]);
   });

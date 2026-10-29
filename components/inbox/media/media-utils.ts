@@ -1,7 +1,7 @@
 /**
  * Helpers puros da renderização de mídia no inbox (Onda 1).
  * A mídia é SEMPRE servida por /api/v1/messages/{id}/media (Onda 0) —
- * o browser segue o 302 pra signed URL; nunca usar media_url do WAHA.
+ * o servidor entrega bytes autenticados; nunca usar media_url do WAHA.
  */
 import { extFromMime } from "@/lib/messaging/media/types";
 import { nomeOriginalDaMensagem } from "@/lib/messaging/media/nome-de-arquivo";
@@ -13,11 +13,8 @@ export function mediaSrc(messageId: string): string {
 /**
  * Link do DOWNLOAD: a mesma rota, com `?baixar=1` (#2613).
  *
- * A diferença não é cosmética. Sem o parâmetro a rota responde 302 para a URL
- * assinada sem `download`, e o navegador salva o basename canônico
- * (`{uuid}.pdf`) — o nome original morria na última etapa, depois de a tela já
- * mostrá-lo. Com o parâmetro, e SÓ quando a mensagem tem nome guardado, a rota
- * pede ao Storage o `Content-Disposition` com esse nome.
+ * A rota devolve os bytes com Content-Disposition: attachment e preserva
+ * o nome original quando conhecido; sem nome, usa o basename do objeto.
  */
 export function mediaDownloadSrc(messageId: string): string {
   return `${mediaSrc(messageId)}?baixar=1`;

@@ -1,3 +1,4 @@
+// @vitest-environment node
 /** A rota real só pode ler mídia no namespace da organização autorizada. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -66,7 +67,6 @@ vi.mock("@/lib/messaging/media/voice-transcode", () => ({
 }));
 
 import { GET } from "@/app/api/v1/messages/[id]/media/route";
-import { VALIDADE_DO_LINK_DE_MIDIA_S } from "@/lib/messaging/media/link-temporario";
 
 function pedir(formato = "") {
   return GET(new Request(`https://app.example/api/v1/messages/${MENSAGEM}/media${formato}`) as never, {
@@ -90,14 +90,12 @@ beforeEach(() => {
 });
 
 describe("mídia da mensagem respeita o namespace autorizado", () => {
-  it("assina o objeto da organização ativa sem alterar o caminho", async () => {
+  it("baixa o objeto da organização ativa sem alterar o caminho", async () => {
     const resposta = await pedir();
-    expect(resposta.status).toBe(302);
-    expect(estado.assinar).toHaveBeenCalledExactlyOnceWith(
-      `${ORG}/${CONVERSA}/entrada.ogg`, VALIDADE_DO_LINK_DE_MIDIA_S, undefined,
-    );
+    expect(resposta.status).toBe(200);
+    expect(estado.baixar).toHaveBeenCalledExactlyOnceWith(`${ORG}/${CONVERSA}/entrada.ogg`);
     expect(estado.filtros).toContainEqual(["organization_id", ORG]);
-    expect(estado.baixar).not.toHaveBeenCalled();
+    expect(estado.assinar).not.toHaveBeenCalled();
     expect(estado.buscarNoCanal).not.toHaveBeenCalled();
   });
 
@@ -131,19 +129,17 @@ describe("mídia da mensagem respeita o namespace autorizado", () => {
   ])("preserva o caminho legítimo %s", async (caminho) => {
     estado.mensagem.media_storage_path = caminho;
     const resposta = await pedir();
-    expect(resposta.status).toBe(302);
-    expect(estado.assinar).toHaveBeenCalledExactlyOnceWith(caminho, VALIDADE_DO_LINK_DE_MIDIA_S, undefined);
+    expect(resposta.status).toBe(200);
+    expect(estado.baixar).toHaveBeenCalledExactlyOnceWith(caminho);
   });
 
-  it("download autorizado preserva o nome nas opções, sem trocá-lo pelo caminho", async () => {
+  it("download autorizado preserva o nome sem trocá-lo pelo caminho", async () => {
     estado.mensagem.metadata = { media_filename: "Orçamento ação.xlsx" };
     const resposta = await pedir("?baixar=1");
-    expect(resposta.status).toBe(302);
-    expect(estado.assinar).toHaveBeenCalledExactlyOnceWith(
-      `${ORG}/${CONVERSA}/entrada.ogg`, VALIDADE_DO_LINK_DE_MIDIA_S,
-      { download: "Orçamento ação.xlsx" },
-    );
-    expect(estado.baixar).not.toHaveBeenCalled();
+    expect(resposta.status).toBe(200);
+    expect(estado.baixar).toHaveBeenCalledExactlyOnceWith(`${ORG}/${CONVERSA}/entrada.ogg`);
+    expect(resposta.headers.get("content-disposition")).toContain("filename*=UTF-8''Or%C3%A7amento%20a%C3%A7%C3%A3o.xlsx");
+    expect(estado.assinar).not.toHaveBeenCalled();
     expect(estado.buscarNoCanal).not.toHaveBeenCalled();
   });
 

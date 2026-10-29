@@ -1,30 +1,5 @@
-/**
- * GET /api/v1/messages/{id}/media?baixar=1 — o nome original ao BAIXAR (#2613).
- *
- * O relato da issue fecha com um critério que o PR anterior deixou declarado
- * como "não verificado": *"Avaliar o fluxo de nomeação do arquivo ao baixar,
- * preservando o nome original quando disponível"*. Até aqui o cartão mostrava
- * `Relatorio_Vendas_Outubro.xlsx` mas o arquivo salvo pelo navegador chegava
- * como `{uuid}.xlsx` — o nome existia no banco e morria na última etapa.
- *
- * O que este arquivo mede, e por quê:
- *
- *  (A) `?baixar=1` + nome guardado → a URL assinada sai com `download`, que é
- *      o que faz o Storage responder `Content-Disposition: attachment` com o
- *      nome. Sem o terceiro argumento, o Storage devolve o basename canônico.
- *  (B) `?baixar=1` SEM nome guardado → NENHUM nome é inventado: a assinatura
- *      continua sem opções de download. Anexo antigo (ou canal que não manda
- *      `filename`) não vira `documento.pdf` na cara do atendente.
- *  (C) sem `?baixar=1` → a rota segue 302 como sempre: o cartão abre o PDF em
- *      aba nova, e o preview não é sequestrado pelo download.
- *  (D) janela do worker (bytes ainda não persistidos) → o proxy devolve
- *      `Content-Disposition` com `filename` (fallback ASCII) e `filename*`
- *      (RFC 5987), que é o único par que nomeia acento corretamente.
- *
- * O caminho de produção é o da rota: `createClient` → RLS → `maybeSingle`, e
- * `createAdminClient` → `storage.from(bucket).createSignedUrl`. Só o adapter
- * do canal é dublado em (D) — ele é quem busca os bytes.
- */
+// @vitest-environment node
+/** Entrega privada, nomes originais, autorização e falhas sem fallback do canal. */
 import { NextRequest } from "next/server";
 import { createClient as criarClienteDoSdk } from "@supabase/supabase-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -78,7 +53,9 @@ type Linha = {
 };
 
 /** O que foi pedido ao Storage — o único lugar onde o nome pode virar download. */
-const ASSINATURAS: Array<{ bucket: string; path: string; ttl: number; opcoes?: unknown }> = [];
+const DOWNLOADS: Array<{ bucket: string; path: string }> = [];
+const baixarObjeto = vi.fn();
+const assinar = vi.fn();
 
 let MENSAGENS: Linha[] = [];
 
@@ -127,12 +104,10 @@ function adminFake() {
     from: () => sessao,
     storage: {
       from: (bucket: string) => ({
-        createSignedUrl: async (path: string, ttl: number, opcoes?: unknown) => {
-          ASSINATURAS.push({ bucket, path, ttl, opcoes });
-          return {
-            data: { signedUrl: `https://storage.test/signed/${path}?token=t` },
-            error: null,
-          };
+        createSignedUrl: assinar,
+        download: async (path: string) => {
+          DOWNLOADS.push({ bucket, path });
+          return baixarObjeto();
         },
       }),
     },
@@ -146,7 +121,10 @@ function url(consulta = ""): string {
 const PARAMS = { params: Promise.resolve({ id: MENSAGEM }) };
 
 beforeEach(() => {
-  ASSINATURAS.length = 0;
+  vi.clearAllMocks();
+  DOWNLOADS.length = 0;
+  baixarObjeto.mockReset();
+  baixarObjeto.mockResolvedValue({ data: new Blob(["%PDF-test"], { type: "application/pdf" }), error: null });
   MENSAGENS = [];
   vi.mocked(createAdminClient).mockReturnValue(adminFake() as never);
   vi.mocked(createClient).mockResolvedValue({
@@ -161,60 +139,97 @@ beforeEach(() => {
   vi.mocked(checkRateLimit).mockResolvedValue({ allowed: true, limit: 30, count: 1 } as never);
 });
 
-describe("?baixar=1 com nome original guardado", () => {
-  it("assina com `download` = nome original, para o arquivo chegar nomeado", async () => {
-    MENSAGENS = [linha({ metadata: { media_filename: NOME } })];
-
-    const res = await GET(new NextRequest(url("?baixar=1")), PARAMS);
-
-    expect(res.status).toBe(302);
-    expect(ASSINATURAS).toHaveLength(1);
-    expect(ASSINATURAS[0]).toMatchObject({ bucket: "whatsapp-media", ttl: 3600 });
-    expect(ASSINATURAS[0]?.opcoes).toEqual({ download: NOME });
-  });
-
-  it("nome com acento e espaço chega inteiro ao Storage", async () => {
-    MENSAGENS = [
-      linha({
-        media_mime: "application/pdf",
-        media_storage_path: `${ORG_ID}/conv/${MENSAGEM}.pdf`,
-        metadata: { media_filename: "Orçamento Ação 2026.pdf" },
-      }),
-    ];
-
-    await GET(new NextRequest(url("?baixar=1")), PARAMS);
-
-    expect(ASSINATURAS[0]?.opcoes).toEqual({ download: "Orçamento Ação 2026.pdf" });
-  });
-});
-
-describe("?baixar=1 sem nome original", () => {
-  it("não inventa nome: assina sem `download`, como hoje", async () => {
-    MENSAGENS = [linha({ metadata: null })];
-
-    const res = await GET(new NextRequest(url("?baixar=1")), PARAMS);
-
-    expect(res.status).toBe(302);
-    expect(ASSINATURAS[0]?.opcoes).toBeUndefined();
-  });
-
-  it("metadata sem a chave (anexo antigo) também não vira nome", async () => {
-    MENSAGENS = [linha({ metadata: { raw_type: "document" } })];
-
-    await GET(new NextRequest(url("?baixar=1")), PARAMS);
-
-    expect(ASSINATURAS[0]?.opcoes).toBeUndefined();
-  });
-});
-
-describe("sem ?baixar=1", () => {
-  it("segue 302 sem `download`: o cartão abre o PDF em vez de baixá-lo", async () => {
-    MENSAGENS = [linha({ metadata: { media_filename: NOME } })];
-
+describe("bytes privados persistidos", () => {
+  it.each(["application/pdf", "image/jpeg"])("abre %s sem redirecionar", async (mime) => {
+    const bytes = mime === "application/pdf" ? Buffer.from("%PDF-test") : Buffer.from([255, 216, 255, 224]);
+    baixarObjeto.mockResolvedValue({ data: new Blob([bytes], { type: mime }), error: null });
+    MENSAGENS = [linha()];
     const res = await GET(new NextRequest(url()), PARAMS);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expect(res.headers.get("content-type")).toBe(mime);
+    expect(res.headers.get("content-disposition")).toBe("inline");
+    expect(res.headers.get("content-length")).toBe(String(bytes.length));
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-request-id")).toBeTruthy();
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(bytes);
+    expect(DOWNLOADS).toEqual([{ bucket: "whatsapp-media", path: linha().media_storage_path }]);
+    expect(assinar).not.toHaveBeenCalled();
+  });
 
-    expect(res.status).toBe(302);
-    expect(ASSINATURAS[0]?.opcoes).toBeUndefined();
+  it.each([NOME, "Orçamento Ação 2026.pdf", "Planilha [100%] + final.xlsx"])(
+    "download preserva o nome original %s", async (nome) => {
+      MENSAGENS = [linha({ metadata: { media_filename: nome } })];
+      const res = await GET(new NextRequest(url("?baixar=1")), PARAMS);
+      expect(res.status).toBe(200);
+      const cd = res.headers.get("content-disposition")!;
+      expect(cd).toMatch(/^attachment;/);
+      expect(decodeURIComponent(cd.split("filename*=UTF-8''")[1]!)).toBe(nome);
+    },
+  );
+
+  it.each([null, { raw_type: "document" }])("sem nome usa o basename canônico (%j)", async (metadata) => {
+    MENSAGENS = [linha({ metadata })];
+    const res = await GET(new NextRequest(url("?baixar=1")), PARAMS);
+    expect(res.headers.get("content-disposition")).toContain(`attachment; filename="${MENSAGEM}.xlsx"`);
+  });
+
+  it.each(["", "?baixar=0", "?baixar=true"])("preview permanece inline (%s)", async (query) => {
+    MENSAGENS = [linha({ metadata: { media_filename: NOME } })];
+    const res = await GET(new NextRequest(url(query)), PARAMS);
+    expect(res.headers.get("content-disposition")).toBe("inline");
+  });
+
+  it.each(["text/html", "image/svg+xml", "", "application/x-unknown"])("não abre tipo ativo/desconhecido %s inline", async (mime) => {
+    MENSAGENS = [linha()];
+    baixarObjeto.mockResolvedValue({ data: new Blob(["conteudo"], { type: mime }) });
+    const res = await GET(new NextRequest(url()), PARAMS);
+    expect(res.headers.get("content-disposition")).toMatch(/^attachment;/);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it.each([["404", 404], [404, 404], ["500", 502], [undefined, 502]])(
+    "falha do Storage %s vira %s sem consultar o canal", async (statusCode, status) => {
+      MENSAGENS = [linha({ media_url: "https://canal.test/media/abc" })];
+      baixarObjeto.mockResolvedValue({ data: null, error: { statusCode } });
+      const res = await GET(new NextRequest(url()), PARAMS);
+      expect(res.status).toBe(status);
+      expect(res.headers.get("location")).toBeNull();
+      expect(getAdapter).not.toHaveBeenCalled();
+    },
+  );
+
+  it("exceção do SDK vira 502, sem fallback", async () => {
+    MENSAGENS = [linha({ media_url: "https://canal.test/media/abc" })];
+    baixarObjeto.mockRejectedValue(new Error("falha sintética"));
+    expect((await GET(new NextRequest(url()), PARAMS)).status).toBe(502);
+    expect(getAdapter).not.toHaveBeenCalled();
+  });
+
+  it("sem sessão não consulta Storage", async () => {
+    vi.mocked(createClient).mockResolvedValue({
+      auth: { getUser: async () => ({ data: { user: null }, error: null }) },
+    } as never);
+    expect((await GET(new NextRequest(url()), PARAMS)).status).toBe(401);
+    expect(DOWNLOADS).toEqual([]);
+  });
+
+  it("mensagem de outra organização não consulta Storage", async () => {
+    MENSAGENS = [linha({ organization_id: "outra-org" })];
+    expect((await GET(new NextRequest(url()), PARAMS)).status).toBe(404);
+    expect(DOWNLOADS).toEqual([]);
+  });
+
+  it("sem organização ativa não consulta Storage", async () => {
+    vi.mocked(orgAtivaDaApi).mockResolvedValue({ ok: true, org: null } as never);
+    expect((await GET(new NextRequest(url()), PARAMS)).status).toBe(403);
+    expect(DOWNLOADS).toEqual([]);
+  });
+
+  it("id inválido não consulta Storage", async () => {
+    expect((await GET(new NextRequest(url()), { params: Promise.resolve({ id: "inválido" }) })).status).toBe(404);
+    expect(DOWNLOADS).toEqual([]);
   });
 });
 
@@ -257,50 +272,23 @@ describe("janela do worker (bytes ainda no canal)", () => {
   });
 });
 
-describe("o nome atravessa o SDK instalado sem codificação duplicada", () => {
-  const caminho = `${ORG_ID}/conv/${MENSAGEM}.xlsx`;
-  const token = "token_ficticio.A-B_C.123";
 
-  // Transporte sintético, SDK real do lockfile: nenhuma rede ou Storage real.
-  // O E2E continua responsável pelos bytes e cabeçalhos do servidor real.
-  const sdk = criarClienteDoSdk("https://storage.test", "chave-ficticia", {
-    auth: { persistSession: false, autoRefreshToken: false, storageKey: "sdk-rota-media-teste" },
-    global: {
-      fetch: async () => Response.json({
-        signedURL: `/object/sign/whatsapp-media/${caminho}?token=${token}`,
-      }),
-    },
-  });
-
-  function usarSdkReal(metadata: Record<string, unknown> | null) {
+describe("SDK real com transporte sintético (sem rede)", () => {
+  it("baixa bytes pela origem interna sem expor a URL e preserva o nome", async () => {
+    const transporte = vi.fn(async () => new Response("%PDF-sintetico", {
+      headers: { "Content-Type": "application/pdf" },
+    }));
+    const sdk = criarClienteDoSdk("http://storage.invalid:8000", "chave-ficticia", {
+      auth: { persistSession: false, autoRefreshToken: false, storageKey: "sdk-rota-media-teste" },
+      global: { fetch: transporte },
+    });
     vi.mocked(createAdminClient).mockReturnValue({ storage: sdk.storage } as never);
-    MENSAGENS = [linha({ media_storage_path: caminho, metadata })];
-  }
-
-  it.each(["arquivo.xlsx", "Relatório sintético.xlsx", "Planilha [100%] + final.xlsx"])(
-    "o parâmetro download decodifica para o nome original %s",
-    async (nome) => {
-      usarSdkReal({ media_filename: nome });
-      const res = await GET(new NextRequest(url("?baixar=1")), PARAMS);
-      expect(res.status).toBe(302);
-      const destino = new URL(res.headers.get("location")!);
-      expect(destino.searchParams.get("download")).toBe(nome);
-      expect(destino.searchParams.get("token")).toBe(token);
-      expect(destino.pathname).toBe(`/storage/v1/object/sign/whatsapp-media/${caminho}`);
-    },
-  );
-
-  it("preview com nome conhecido continua sem parâmetro download", async () => {
-    usarSdkReal({ media_filename: "Relatório sintético.xlsx" });
-    const res = await GET(new NextRequest(url()), PARAMS);
-    const destino = new URL(res.headers.get("location")!);
-    expect(destino.searchParams.has("download")).toBe(false);
-    expect(destino.searchParams.get("token")).toBe(token);
-  });
-
-  it("download sem nome continua sem nome inventado", async () => {
-    usarSdkReal(null);
+    MENSAGENS = [linha({ metadata: { media_filename: "Orçamento [100%].pdf" } })];
     const res = await GET(new NextRequest(url("?baixar=1")), PARAMS);
-    expect(new URL(res.headers.get("location")!).searchParams.has("download")).toBe(false);
+    expect(transporte).toHaveBeenCalledOnce();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expect(await res.text()).toBe("%PDF-sintetico");
+    expect(res.headers.get("content-disposition")).toContain("filename*=UTF-8''Or%C3%A7amento%20%5B100%25%5D.pdf");
   });
 });

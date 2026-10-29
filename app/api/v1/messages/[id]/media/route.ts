@@ -1,7 +1,7 @@
 // app/api/v1/messages/[id]/media/route.ts
 /**
  * GET /api/v1/messages/[id]/media — acesso autenticado à mídia da mensagem.
- * Persistida → 302 pra signed URL (TTL 1h) do bucket whatsapp-media.
+ * Persistida → bytes privados do bucket whatsapp-media pelo domínio do app.
  * Ainda não persistida (janela até o worker rodar) → proxy dos bytes do WAHA.
  * A URL desta rota é usada diretamente como src de <img>/<video>/<audio>
  * (cookie de sessão vai junto por ser same-origin; RLS decide o acesso).
@@ -12,7 +12,7 @@
  * memória: nada é guardado no Storage nem no aparelho.
  */
 import { randomUUID } from "node:crypto";
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
 import { z } from "zod";
 
 import { checkRateLimit } from "@/lib/ai/dispatcher/rate-limit";
@@ -21,8 +21,7 @@ import { loadAuthUser } from "@/lib/auth/server";
 import { orgAtivaDaApi } from "@/lib/auth/require-role";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { logger } from "@/lib/logger";
-import { cabecalhoDeDownload, urlAssinadaParaDownload } from "@/lib/messaging/media/download-com-nome";
-import { VALIDADE_DO_LINK_DE_MIDIA_S } from "@/lib/messaging/media/link-temporario";
+import { cabecalhoDeDownload } from "@/lib/messaging/media/download-com-nome";
 import { nomeOriginalDaMensagem } from "@/lib/messaging/media/nome-de-arquivo";
 import { isMediaPathInOrganization } from "@/lib/messaging/media/upload-validation";
 import { ConversorOcupado, TETO_REPRODUCAO_BYTES, paraReproducaoAac } from "@/lib/messaging/media/voice-transcode";
@@ -60,6 +59,13 @@ const TETO_CONVERSAO_POR_ORGANIZACAO = 120;
 const JANELA_CONVERSAO_S = 60;
 /** Conversor do processo cheio: uma conversão leva poucos segundos. */
 const ESPERA_CONVERSOR_OCUPADO_S = 5;
+
+// Tipos ativos (HTML/SVG) e desconhecidos só podem ser baixados.
+const MIME_INLINE = new Set([
+  "application/pdf", "image/jpeg", "image/png", "image/webp", "image/gif", "image/avif",
+  "audio/ogg", "audio/mpeg", "audio/mp4", "audio/aac", "audio/webm", "audio/opus", "audio/wav",
+  "video/mp4", "video/webm", "video/ogg", "video/quicktime",
+]);
 
 /** O que o Safari antigo não toca e o ffmpeg sabe abrir. O resto já toca. */
 const AUDIO_CONVERTIVEL = new Set(["audio/ogg", "audio/webm", "audio/opus"]);
@@ -124,6 +130,9 @@ export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
 
   // Validação DEPOIS da autorização: quem não está logado recebe 401, não 422.
+  if (!z.string().uuid().safeParse(messageId).success) {
+    return fail("not_found", t("Mensagem sem mídia."), 404, { requestId });
+  }
   const params = new URL(req.url).searchParams;
   const consulta = Consulta.safeParse({
     formato: params.get("formato") ?? undefined,
@@ -177,10 +186,7 @@ export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     return fail("not_found", t("Mensagem sem mídia."), 404, { requestId });
   }
 
-  // O nome original guardado pela ingestão (#2613), lido SÓ quando o pedido é
-  // download — o preview abre como sempre. `null` significa "não há nome a
-  // preservar": as duas respostas abaixo seguem exatamente como antes, sem
-  // inventar `documento.pdf` para o atendente.
+  // Preserva o nome original no download; o preview continua inline quando seguro.
   const nomeDoArquivo = baixar ? nomeOriginalDaMensagem(msg.metadata) : null;
   if (!msg.media_storage_path && !msg.media_url) {
     // A mídia foi podada pela retenção (o marcador `expired` da migration 0557 é
@@ -205,7 +211,7 @@ export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
 
   // A RLS autoriza a linha, não o objeto apontado por ela. O cliente admin
-  // ignora a RLS do Storage: valide ANTES de assinar ou baixar para conversão.
+  // ignora a RLS do Storage: valide ANTES de baixar, inclusive para conversão.
   // Caminho inválido não pode cair no fallback do canal.
   if (msg.media_storage_path != null && !isMediaPathInOrganization(msg.media_storage_path, activeOrg.orgId)) {
     return fail("not_found", t("Mensagem sem mídia."), 404, { requestId });
@@ -214,30 +220,32 @@ export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   if (paraTocar) return converterParaTocar(activeOrg.orgId, msg, requestId, t);
 
   if (msg.media_storage_path) {
-    const admin = createAdminClient();
-    // `download` é o que faz o Storage responder `Content-Disposition:
-    // attachment; filename=<nome>` em vez do basename canônico — é a última
-    // milha do #2613, onde o nome já aparecia na tela e morria no arquivo salvo.
-    const { data: signed, error: signErr } = await admin.storage
-      .from("whatsapp-media")
-      .createSignedUrl(
-        msg.media_storage_path,
-        VALIDADE_DO_LINK_DE_MIDIA_S,
-        nomeDoArquivo ? { download: nomeDoArquivo } : undefined,
-      );
-    if (!signErr && signed?.signedUrl) {
-      const response = NextResponse.redirect(
-        nomeDoArquivo ? urlAssinadaParaDownload(signed.signedUrl, nomeDoArquivo) : signed.signedUrl,
-        302,
-      );
-      response.headers.set("X-Request-Id", requestId);
-      return response;
-    }
-    if (signErr) {
-      logger.error("messages.media.sign_failed", {
-        message_id: messageId,
-        erro: signErr.message,
+    // O SDK pode usar um hostname interno: nunca o entregue ao navegador.
+    // Falha no objeto persistido não autoriza recuperar bytes antigos do canal.
+    try {
+      const { data: file, error: storageError } = await createAdminClient()
+        .storage.from("whatsapp-media")
+        .download(msg.media_storage_path);
+      if (storageError || !file) {
+        const missing = String((storageError as { statusCode?: string | number } | null)?.statusCode) === "404";
+        return fail(missing ? "not_found" : "bad_gateway", t("Mídia indisponível no momento."), missing ? 404 : 502, { requestId });
+      }
+      const mime = file.type || "application/octet-stream";
+      const baseMime = mime.split(";")[0]!.trim().toLowerCase();
+      const inline = MIME_INLINE.has(baseMime) && !baixar;
+      const filename = nomeDoArquivo ?? msg.media_storage_path.split("/").pop()!;
+      return new Response(file.stream(), {
+        headers: {
+          "Content-Type": mime,
+          "Content-Length": String(file.size),
+          "Content-Disposition": inline ? "inline" : cabecalhoDeDownload(filename),
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": requestId,
+        },
       });
+    } catch {
+      return fail("bad_gateway", t("Mídia indisponível no momento."), 502, { requestId });
     }
   }
 
