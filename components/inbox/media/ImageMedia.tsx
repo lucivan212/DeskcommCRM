@@ -7,7 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 import { MediaUnavailable } from "./MediaUnavailable";
-import { mediaSrc } from "./media-utils";
+import { mediaDownloadSrc, mediaSrc } from "./media-utils";
 
 interface Props {
   messageId: string;
@@ -25,12 +25,27 @@ export function ImageMedia({ messageId, alt, src: fonte }: Props) {
   const t = useT();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [open, setOpen] = useState(false);
-  const src = fonte ?? mediaSrc(messageId);
+  const [attempt, setAttempt] = useState(0);
+  const baseSrc = fonte ?? mediaSrc(messageId);
+  const src = attempt === 0 ? baseSrc : `${baseSrc}${baseSrc.includes("?") ? "&" : "?"}retry=${attempt}`;
+  const download = (
+    <a href={fonte ?? mediaDownloadSrc(messageId)} target="_blank" rel="noreferrer" className="text-sm underline">
+      {t("Baixar")}
+    </a>
+  );
 
   if (state === "error")
     return (
-      <div className="w-64 max-w-full aspect-[4/3]">
-        <MediaUnavailable kind="Imagem" className="h-full w-full" />
+      <div className="w-64 max-w-full">
+        <MediaUnavailable kind="Imagem" className="aspect-[4/3] w-full" />
+        <button
+          type="button"
+          className="mr-3 text-sm underline"
+          onClick={() => { setAttempt((n) => n + 1); setState("loading"); }}
+        >
+          {t("Tentar novamente")}
+        </button>
+        {download}
       </div>
     );
 
@@ -50,6 +65,7 @@ export function ImageMedia({ messageId, alt, src: fonte }: Props) {
         {state === "loading" && <Skeleton className="absolute inset-0 h-full w-full" />}
         <img src={src} alt={alt} loading="lazy" onLoad={() => setState("ready")} onError={() => setState("error")} className="h-full w-full object-cover" />
       </button>
+      {download}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-4xl border-none bg-transparent p-0 shadow-none">
           <DialogTitle className="sr-only">{alt}</DialogTitle>

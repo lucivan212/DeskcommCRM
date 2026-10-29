@@ -36,6 +36,34 @@ describe("ImageMedia", () => {
     fireEvent.error(screen.getByAltText("Imagem recebida"));
     expect(screen.getByText("Mídia indisponível")).toBeInTheDocument();
   });
+  it("permite repetir após falha e só amplia depois de carregar", () => {
+    render(<ImageMedia messageId="m1" alt="Imagem recebida" />);
+    fireEvent.error(screen.getByAltText("Imagem recebida"));
+    fireEvent.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    expect(screen.getByAltText("Imagem recebida")).toHaveAttribute("src", "/api/v1/messages/m1/media?retry=1");
+    expect(screen.getByRole("button", { name: /ampliar imagem/i })).toBeDisabled();
+    fireEvent.error(screen.getByAltText("Imagem recebida"));
+    fireEvent.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    expect(screen.getByAltText("Imagem recebida")).toHaveAttribute("src", "/api/v1/messages/m1/media?retry=2");
+    fireEvent.load(screen.getByAltText("Imagem recebida"));
+    expect(screen.getByRole("button", { name: /ampliar imagem/i })).not.toBeDisabled();
+  });
+
+  it("oferece download inclusive após falha", () => {
+    render(<ImageMedia messageId="m1" alt="Imagem recebida" />);
+    expect(screen.getByRole("link", { name: "Baixar" })).toHaveAttribute("href", "/api/v1/messages/m1/media?baixar=1");
+    fireEvent.error(screen.getByAltText("Imagem recebida"));
+    expect(screen.getByRole("link", { name: "Baixar" })).toHaveAttribute("href", "/api/v1/messages/m1/media?baixar=1");
+  });
+
+  it("preserva a fonte alternativa da nota e sua query no retry", () => {
+    render(<ImageMedia messageId="nota" alt="Anexo" src="/api/notas/1/media?tipo=imagem" />);
+    fireEvent.error(screen.getByAltText("Anexo"));
+    fireEvent.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    expect(screen.getByAltText("Anexo")).toHaveAttribute("src", "/api/notas/1/media?tipo=imagem&retry=1");
+    expect(screen.getByRole("link", { name: "Baixar" })).toHaveAttribute("href", "/api/notas/1/media?tipo=imagem");
+  });
+
 });
 
 describe("StickerMedia", () => {

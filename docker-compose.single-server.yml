@@ -3,6 +3,8 @@
 
 services:
   app:
+    ports:
+      - "127.0.0.1:8150:3000"
     networks:
       - internal
       - supabase_private
@@ -21,6 +23,7 @@ services:
       - supabase_private
 
   caddy:
+    profiles: ["disabled-p0"]
     volumes:
       - ./Caddyfile.single-server:/etc/caddy/Caddyfile:ro
       # Ponto de extensão (#2724), a MESMA da variante normal: arquivos .caddy

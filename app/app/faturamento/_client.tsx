@@ -55,7 +55,8 @@ type Relatorio = Totais & {
   por_moeda?: Record<string, Totais>;
 };
 
-type Pessoa = { user_id: string; name: string | null; email: string | null };
+/** O formato de `/api/v1/team/assignable`: o nome vem em `full_name`. */
+type Pessoa = { user_id: string; full_name: string | null };
 
 /**
  * O período padrão do relatório no calendário de quem usa a tela (#2935).
@@ -122,7 +123,7 @@ export function Faturamento({
   const nomeDe = (id: string | null) => {
     if (!id) return t("Sem responsável");
     const p = (equipe.data ?? []).find((x) => x.user_id === id);
-    return p?.name ?? p?.email ?? t("Sem responsável");
+    return p?.full_name ?? t("Sem responsável");
   };
 
   // Os nomes dos clientes, pelo mesmo motivo dos da equipe: o relatório devolve
@@ -201,7 +202,7 @@ export function Faturamento({
             value={de}
             data-testid="periodo-de"
             onChange={(e) => setDe(e.target.value)}
-            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text"
+            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text max-md:min-h-11"
           />
         </label>
         <label className="flex flex-col gap-1 text-xs text-text-muted">
@@ -211,7 +212,7 @@ export function Faturamento({
             value={ate}
             data-testid="periodo-ate"
             onChange={(e) => setAte(e.target.value)}
-            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text"
+            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text max-md:min-h-11"
           />
         </label>
       </form>
@@ -253,6 +254,10 @@ export function Faturamento({
       <ListaDeLancamentos
         lancamentos={lancamentos.data ?? []}
         contas={contas.data ?? []}
+        // A moeda da organização é a régua do valor digitado (#3367) — mesma
+        // moeda que ordena os blocos acima. A `currency` gravada na linha ainda
+        // nasce no padrão do banco, BRL (ver #3379).
+        moeda={moedaDaOrg}
         podeLancar={podeLancar}
         onCriar={(corpo) => criar.mutate(corpo)}
         onPagar={(id) => pagar.mutate(id)}
